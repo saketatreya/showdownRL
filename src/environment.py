@@ -188,9 +188,6 @@ class Gen9RLEnvironment(SinglesEnv, gymnasium.Env):
         
         for attempt in range(max_retries):
             try:
-                # ===============================================================
-                pass
-                # ===============================================================
 
                 # RESET REWARD EVALUATOR FIRST to prevent delta spikes from previous episode
                 if hasattr(self, 'reward_evaluator'):
@@ -332,36 +329,7 @@ class Gen9RLEnvironment(SinglesEnv, gymnasium.Env):
             'event_move_failed': False
         }
         
-        # 1. Switch Detection
-        # We need to know if we SWITCHED explicitly or via U-turn.
-        # last_battle has previous active. battle has current.
-        if last_battle and battle:
-            pre_active = last_battle.active_pokemon
-            post_active = battle.active_pokemon
-            
-            if pre_active and post_active and pre_active.species != post_active.species:
-                # Active changed.
-                # Was it forced?
-                if last_battle.force_switch:
-                    signals['event_switch_type'] = 'forced'
-                else:
-                    # Check action type
-                    # We need the last action index. poke-env stores self.last_action (if available?)
-                    # If not, we infer: 
-                    # If we used a Move (0-3) and switched -> U-turn.
-                    # If we used Switch (4+) -> Manual.
-                    # Problem: We don't easily have 'last_action' index here unless we stored it.
-                    # But wait! 'step' hasn't returned yet. 'self._last_action' might be set?
-                    # poke-env doesn't expose _last_action widely.
-                    # However, we can use the 'turn' count? No.
-                    # Let's trust 'Manual Switch' has distinct signature?
-                    # Actually, we can store 'last_action_index' in step() before calling super().step()?
-                    # But calc_reward is called INSIDE super().step().
-                    # So we need to store it in 'Gen9RLEnvironment' before calling super().step().
-                    # We can use 'self._current_action_index' set in step().
-                    pass 
-            
-        # Refined Logic relying on self._current_action_index (set in step)
+        # 1. Switch Detection using _current_action_index (set in step)
         if hasattr(self, '_current_action_index'):
             action = self._current_action_index
             # Fix for TypeError: handle dict actions (sometimes passed by wrappers)

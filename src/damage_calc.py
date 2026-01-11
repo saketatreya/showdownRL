@@ -400,9 +400,9 @@ class BeliefDamageCalculator:
              eff *= get_type_effectiveness(predicted_move_type.lower(), defender.type_2.name.lower(), None)
 
              
-        # STAB
-        pass # Hard to know without iterating all roles
+        # Note: STAB calculation skipped for incoming damage estimation
+        # (we don't know opponent's exact move, only predicted type)
         
-        # Rough percentage
+        # Rough percentage based on type effectiveness only
         rough_pct = (estimated_power / 100.0) * eff * 0.35
         return rough_pct
