@@ -14,9 +14,6 @@ class SparseRewardEvaluator:
     Simple sparse reward evaluator.
     
     R = +1 for win, -1 for loss, 0 otherwise.
-    
-    Based on Wang thesis findings: pure sparse rewards with high gamma (0.9999)
-    and proper LR annealing outperform complex reward shaping.
     """
     
     def __init__(self, victory_bonus: float = 1.0, defeat_penalty: float = -1.0):
