@@ -21,7 +21,7 @@ from poke_env.battle import AbstractBattle
 from .belief_tracker import BeliefTracker
 from .embeddings import ObservationBuilder
 from .utils import load_pokemon_data
-from .rewards import DeltaRewardEvaluator, HybridRewardEvaluator
+from .rewards import SparseRewardEvaluator
 from .actions import ActionHandler
 from .config import RewardConfig
 from .curriculum_agents.win_tracker import WinRateTracker
@@ -142,13 +142,8 @@ class Gen9RLEnvironment(SinglesEnv, gymnasium.Env):
         if reward_config:
             self.reward_config.update(reward_config)
         
-        # Initialize Reward Evaluator
-        reward_shaping = kwargs.get('reward_shaping', 'hybrid')
-        if reward_shaping == 'potential':
-            from .rewards import PotentialBasedRewardEvaluator
-            self.reward_evaluator = PotentialBasedRewardEvaluator()
-        else:
-            self.reward_evaluator = HybridRewardEvaluator(self.reward_config)
+        # Initialize Sparse Reward Evaluator (self-play value bootstrap)
+        self.reward_evaluator = SparseRewardEvaluator()
         
         self.action_handler = ActionHandler()
         self._init_metrics()

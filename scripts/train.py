@@ -63,9 +63,9 @@ def parse_args():
                         help="Batch size for training")
     parser.add_argument("--n-epochs", type=int, default=default_config.n_epochs,
                         help="Epochs per update")
-    parser.add_argument("--gamma", type=float, default=default_config.gamma,
-                        help="Discount factor")
-    parser.add_argument("--experiment-name", type=str, default="hybrid_ladder",
+    parser.add_argument("--gamma", type=float, default=0.9999,
+                        help="Discount factor (0.9999 recommended for sparse rewards)")
+    parser.add_argument("--experiment-name", type=str, default="selfplay",
                         help="Name of the experiment (affects log/checkpoint dirs)")
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed")
@@ -78,9 +78,6 @@ def parse_args():
                         help="Number of parallel environments")
     parser.add_argument("--no-subproc", action="store_true",
                         help="Use DummyVecEnv instead of SubprocVecEnv (for debugging)")
-    
-    parser.add_argument("--reward-shaping", type=str, default="hybrid", choices=["hybrid", "potential"],
-                        help="Reward shaping method: 'hybrid' (default) or 'potential'")
     
     return parser.parse_args()
 
