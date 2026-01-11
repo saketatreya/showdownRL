@@ -67,20 +67,16 @@ def create_env(pokemon_data: Dict, battle_format: str = "gen9randombattle") -> D
     timestamp = int(time.time() * 1000) % 100000
     worker_id = f"Tuner_{timestamp}"
     
-    teambuilder = RandomBattleTeambuilder(pokemon_data=pokemon_data)
-    
-    # Simple opponent for tuning
+    # gen9randombattle auto-generates teams, don't pass custom teams
     opponent = SimpleHeuristicsPlayer(
         battle_format=battle_format,
         account_configuration=AccountConfiguration(f"TuneOpp_{timestamp}", None),
-        team=teambuilder.yield_team()
     )
     
     env = Gen9RLEnvironment(
         pokemon_data=pokemon_data,
         battle_format=battle_format,
         account_configuration1=AccountConfiguration(worker_id, None),
-        teambuilder=teambuilder,
     )
     
     from poke_env.environment import SingleAgentWrapper
@@ -102,20 +98,17 @@ def evaluate_model(model, pokemon_data: Dict, n_episodes: int = 50) -> float:
     from poke_env.environment import SingleAgentWrapper
     
     timestamp = int(time.time() * 1000) % 100000
-    teambuilder = RandomBattleTeambuilder(pokemon_data=pokemon_data)
     
-    # Create evaluation opponent
+    # gen9randombattle auto-generates teams
     opponent = SimpleHeuristicsPlayer(
         battle_format="gen9randombattle",
         account_configuration=AccountConfiguration(f"EvalOpp_{timestamp}", None),
-        team=teambuilder.yield_team()
     )
     
     env = Gen9RLEnvironment(
         pokemon_data=pokemon_data,
         battle_format="gen9randombattle",
         account_configuration1=AccountConfiguration(f"EvalAgent_{timestamp}", None),
-        teambuilder=teambuilder,
     )
     
     wrapped = SingleAgentWrapper(env, opponent=opponent)
