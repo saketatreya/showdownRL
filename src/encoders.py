@@ -273,8 +273,14 @@ class MovesEncoder:
              our_para = our_mon.status.name.lower() == 'par' if our_mon.status else False
              opp_para = opp_mon.status.name.lower() == 'par' if opp_mon.status else False
              
-             our_tailwind = 'tailwind' in battle.side_conditions
-             opp_tailwind = 'tailwind' in battle.opponent_side_conditions
+             # battle.side_conditions keys are enums (SideCondition), not strings.
+             try:
+                 from poke_env.battle.side_condition import SideCondition
+                 our_tailwind = SideCondition.TAILWIND in battle.side_conditions
+                 opp_tailwind = SideCondition.TAILWIND in battle.opponent_side_conditions
+             except Exception:
+                 our_tailwind = any('tailwind' in str(k).lower() for k in getattr(battle, "side_conditions", {}).keys())
+                 opp_tailwind = any('tailwind' in str(k).lower() for k in getattr(battle, "opponent_side_conditions", {}).keys())
              
              # Calculate raw effective speed
              s1 = calculate_speed(our_mon.base_stats.get('spe', 100), our_mon.level, our_mon.boosts.get('spe',0), our_para, our_tailwind)
@@ -816,23 +822,30 @@ class MetaEncoder:
 class ActionMaskEncoder:
     """Encodes legal action mask."""
     
+    # NOTE: We use poke-env's native Gen9 SinglesEnv action mapping:
+    # 0-5: switches, 6-9: moves, 10-13: mega, 14-17: z-move, 18-21: dynamax, 22-25: tera
+    # (Some gimmicks are unavailable in Gen9 randombattle but still exist in the action space.)
     SIZE = 26
     
     def encode(self, battle: AbstractBattle) -> np.ndarray:
+        """
+        Returns a 26-dim mask aligned with poke-env's SinglesEnv.action_to_order mapping.
+        We mark an action valid iff poke-env accepts the converted order as legal
+        (i.e., it is present in `battle.valid_orders`).
+        """
         mask = np.zeros(self.SIZE, dtype=np.float32)
-        
-        # Moves 0-3
-        for i, move in enumerate(battle.available_moves[:4]):
-            mask[i] = 1.0
-            
-        # Switches 4-8
-        for i, pokemon in enumerate(battle.available_switches[:5]):
-            if not battle.trapped:
-                mask[4 + i] = 1.0
-                
-        # Terastallize 9-12
-        if battle.can_tera:
-             for i, move in enumerate(battle.available_moves[:4]):
-                 mask[9 + i] = 1.0
-                 
+
+        if battle is None:
+            return mask
+
+        # Import locally to avoid any import-time side effects.
+        from poke_env.environment import SinglesEnv
+
+        for action in range(self.SIZE):
+            try:
+                SinglesEnv.action_to_order(np.int64(action), battle, fake=False, strict=True)
+            except Exception:
+                continue
+            mask[action] = 1.0
+
         return mask

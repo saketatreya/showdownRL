@@ -10,9 +10,9 @@ The `BeliefTracker` (`src/belief_tracker.py`) uses **Bayesian inference** to con
 BeliefTracker
     └─ PokemonBelief (per opponent mon)
         ├─ role_probs: Dict[str, float]    # P(role | observations)
-        ├─ observed_moves: Set[str]        # Confirmed moves
-        ├─ confirmed_item: Optional[str]   # Revealed item
-        ├─ confirmed_ability: Optional[str] # Revealed ability
+        ├─ observed_moves: Set[str]        # Revealed moves
+        ├─ observed_item: Optional[str]    # Revealed item
+        ├─ observed_ability: Optional[str] # Revealed ability
         └─ observed_tera: Optional[str]    # Revealed tera type
 ```
 
@@ -81,7 +81,7 @@ If opponent uses same move twice with Choice item:
 | Index | Feature |
 |-------|---------|
 | 0–3 | Top 4 role probabilities |
-| 4–7 | Top 4 unrevealed move type probabilities |
+| 4–7 | Top 4 unrevealed move probabilities |
 | 8 | Item revealed (0/1) |
 | 9 | Moves revealed / 4 |
 
@@ -89,5 +89,6 @@ If opponent uses same move twice with Choice item:
 
 The `BeliefEncoder` feeds embeddings into the observation vector:
 - 96 floats total (16 features × 6 opponent mons)
+- Per-mon features include: top 4 role probabilities, top 4 move probabilities, top 3 item probabilities, top 3 tera-type probabilities, moves revealed fraction, and role entropy
 - Allows policy to reason about hidden information
 - Enables informed switching against predicted movesets

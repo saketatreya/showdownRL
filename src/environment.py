@@ -2,11 +2,8 @@
 Custom Gymnasium environment for Gen 9 Random Battle RL training.
 Extends poke_env's SinglesEnv with custom observations and rewards.
 
-Reward Design: Delta-based state value function
-- Material Layer: HP balance + fainted count
-- Positional Layer: Type matchup advantage
-- Future Potential Layer: Status + stat boosts
-- Terminal Layer: Win/loss bonus + step cost
+Reward Design: Sparse terminal reward (Wang 2024)
+- +1.0 on win, -1.0 on loss, 0.0 otherwise
 """
 
 import numpy as np
@@ -21,10 +18,7 @@ from poke_env.battle import AbstractBattle
 from .belief_tracker import BeliefTracker
 from .embeddings import ObservationBuilder
 from .utils import load_pokemon_data
-from .rewards import SparseRewardEvaluator
 from .actions import ActionHandler
-from .config import RewardConfig
-from .curriculum_agents.win_tracker import WinRateTracker
 
 
 class Gen9RLEnvironment(SinglesEnv, gymnasium.Env):
@@ -32,14 +26,7 @@ class Gen9RLEnvironment(SinglesEnv, gymnasium.Env):
     Custom Gymnasium environment for Gen 9 Random Battle.
     ...
     """
-    # Get default reward config from config.py (single source of truth)
-    # Extra env-specific keys added here
-    _ENV_SPECIFIC_CONFIG = {
-        'step_cost': 0.01,
-        'switch_tax': 0.10,
-        'move_fail_penalty': 0.15,
-        'invalid_action_penalty': 2.0,
-    }
+
 
     @property
     def action_space(self):
@@ -136,21 +123,10 @@ class Gen9RLEnvironment(SinglesEnv, gymnasium.Env):
             for agent in self.possible_agents
         }
         
-        default_config = RewardConfig()
-        self.reward_config = default_config.model_dump()
-        self.reward_config.update(self._ENV_SPECIFIC_CONFIG)
-        if reward_config:
-            self.reward_config.update(reward_config)
-        
-        # Initialize Sparse Reward Evaluator (self-play value bootstrap)
-        self.reward_evaluator = SparseRewardEvaluator()
-        
         self.action_handler = ActionHandler()
-        self._init_metrics()
-        self._current_signals = {} # Cache for signals detected in calc_reward
         
         # Explicitly define Gym spaces to satisfy validation without waiting for agent creation
-        # Action space: 26 discrete actions (See ActionHandler)
+        # Action space: 26 discrete actions (poke-env SinglesEnv for Gen9)
         from gymnasium.spaces import Discrete
         self._action_space = Discrete(26)
         
@@ -164,6 +140,12 @@ class Gen9RLEnvironment(SinglesEnv, gymnasium.Env):
         import asyncio
         import time
         from pathlib import Path
+
+        # New battle => reset any cross-episode state
+        try:
+            self.belief_tracker.reset()
+        except Exception:
+            pass
         
         # Increment internal game counter
         if not hasattr(self, '_games_played'):
@@ -189,9 +171,7 @@ class Gen9RLEnvironment(SinglesEnv, gymnasium.Env):
         for attempt in range(max_retries):
             try:
 
-                # RESET REWARD EVALUATOR FIRST to prevent delta spikes from previous episode
-                if hasattr(self, 'reward_evaluator'):
-                    self.reward_evaluator.reset()
+
 
                 # Standard reset
                 obs, info = super().reset(seed=seed, options=options)
@@ -253,26 +233,47 @@ class Gen9RLEnvironment(SinglesEnv, gymnasium.Env):
                     raise e
         return None  # Should not reach here
 
-    def _init_metrics(self):
-        """Initialize episode metrics to default values."""
-        self._episode_metrics = {
-            "damaging_moves": 0,
-            "total_moves": 0,
-            "setup_moves": 0,
-            "setup_success": 0,
-            "switch_events": 0,
-            "switch_matchup_delta": 0.0,
-            "move_failures": 0,
-            "reward_components": {
-                "hp": 0.0, "fainted": 0.0, "matchup": 0.0, "victory": 0.0
-            }
-        }
+    def get_additional_info(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Extend poke-env info dicts with battle outcome and metadata.
+        This is critical for callbacks (e.g. EloCallback) in SubprocVecEnv, where
+        direct environment introspection from the main process is not possible.
+        """
+        agent1 = self.agent1.username
+        agent2 = self.agent2.username
 
-    @property
-    def observation_space(self):
-        """Return the observation space."""
-        low, high = self.obs_builder.get_observation_space_bounds()
-        return Box(low=low, high=high, dtype=np.float32)
+        info: Dict[str, Dict[str, Any]] = {agent1: {}, agent2: {}}
+
+        def add_battle_info(agent: str, battle: Optional[AbstractBattle]):
+            if not battle:
+                return
+            info[agent]["battle_tag"] = getattr(battle, "battle_tag", None)
+            info[agent]["turn"] = getattr(battle, "turn", 0)
+            finished = bool(getattr(battle, "finished", False))
+            info[agent]["battle_finished"] = finished
+
+            if finished:
+                won = getattr(battle, "won", None)
+                if won is True:
+                    info[agent]["battle_won"] = True
+                    info[agent]["result"] = "win"
+                elif won is False:
+                    info[agent]["battle_won"] = False
+                    info[agent]["result"] = "loss"
+                else:
+                    info[agent]["battle_won"] = False
+                    info[agent]["result"] = "draw"
+
+        add_battle_info(agent1, getattr(self, "battle1", None))
+        add_battle_info(agent2, getattr(self, "battle2", None))
+
+        # Side-channel: allow wrappers/scripts to attach an external opponent identifier.
+        # (Used by EloCallback to track rating vs sampled self-play checkpoints.)
+        if hasattr(self, "external_opponent_id"):
+            info[agent1]["opponent_id"] = getattr(self, "external_opponent_id")
+
+        return info
+
 
     def embed_battle(self, battle: AbstractBattle) -> np.ndarray:
         """
@@ -284,8 +285,15 @@ class Gen9RLEnvironment(SinglesEnv, gymnasium.Env):
         Returns:
             Observation vector
         """
-        # Update beliefs based on battle events
-        self._update_beliefs_from_battle(battle)
+        # Update beliefs only from agent1's perspective. poke-env calls embed_battle for
+        # both battle1 and battle2 each step; updating from both perspectives would
+        # contaminate the belief state (especially in mirror-species matchups).
+        try:
+            if battle is not None and battle.player_username == self.agent1.username:
+                self._update_beliefs_from_battle(battle)
+        except Exception:
+            # If battle/agent objects are not fully initialized, fail open.
+            self._update_beliefs_from_battle(battle)
         
         # Build observation
         embedding = self.obs_builder.embed_battle(battle)
@@ -311,175 +319,63 @@ class Gen9RLEnvironment(SinglesEnv, gymnasium.Env):
             if pokemon.ability:
                 self.belief_tracker.update(species, observed_ability=pokemon.ability)
 
+            # Record revealed tera type once terastallization happens.
+            try:
+                if getattr(pokemon, "is_terastallized", False) and getattr(pokemon, "tera_type", None):
+                    self.belief_tracker.update(species, observed_tera=pokemon.tera_type.name.lower())
+            except Exception:
+                pass
+
 
     # ... (metrics methods) ...
 
     # =========================================================================
-    # DELTA-BASED REWARD FUNCTION
+    # TERMINAL REWARD FUNCTION
     # =========================================================================
     
     def calc_reward(self, battle: AbstractBattle, last_battle: Optional[AbstractBattle] = None) -> float:
         """
-        Calculate reward using Hybrid Evaluator.
-        Detects events (U-turn, Failure) by comparing battle vs last_battle.
+        Calculates terminal reward (+1 for win, -1 for loss, 0 otherwise)
+        Matches Wang (2024) MIT Thesis method.
         """
-        # Detect signals
-        signals = {
-            'event_switch_type': None,
-            'event_move_failed': False
-        }
-        
-        # 1. Switch Detection using _current_action_index (set in step)
-        if hasattr(self, '_current_action_index'):
-            action = self._current_action_index
-            # Fix for TypeError: handle dict actions (sometimes passed by wrappers)
-            if isinstance(action, dict):
-                # Assume action is {'action': int} or similar?
-                # Actually, stable_baselines3 passes np.ndarray or int. 
-                # If wrapped in Dict space? 
-                # Let's inspect, but for now safe cast.
-                # If dict, try to get value. Use list(action.values())[0]?
-                # Or just skip signal detection if invalid.
-                if 'action' in action:
-                     action = action['action']
-                else: 
-                     # invalid dict input, fallback to 0
-                     action = 0
-            
-            # Ensure action is int/float before comparing
-            if isinstance(action, (int, float, np.integer, np.floating)):
-                is_move = action < 4
-                is_switch = action >= 4
-                
-                if last_battle and battle:
-                     pre_active = last_battle.active_pokemon
-                     post_active = battle.active_pokemon
-                     if pre_active and post_active and pre_active.species != post_active.species:
-                         if last_battle.force_switch:
-                             signals['event_switch_type'] = 'forced'
-                         elif is_switch:
-                             signals['event_switch_type'] = 'manual'
-                         elif is_move:
-                             signals['event_switch_type'] = 'uturn'
-        
-        # 2. Move Failure
-        # Check messages
-        if hasattr(battle, '_messages') and battle._messages:
-             # Initialize processed pointer if missing
-             if not hasattr(self, '_last_message_index'):
-                 self._last_message_index = 0
-                 
-             # Only check NEW messages
-             new_messages = battle._messages[self._last_message_index:]
-             for msg in new_messages:
-                 msg_str = str(msg).lower() if msg else ''
-                 if '|-fail|' in msg_str or '|-immune|' in msg_str or '|-miss|' in msg_str:
-                     signals['event_move_failed'] = True
-                     break
-             
-             # Update pointer
-             self._last_message_index = len(battle._messages)
-        
-        # Store for step() to pick up
-        self._current_signals = signals
-        
-        # Calculate Reward
-        reward = self.reward_evaluator.calc_reward(battle, info=signals)
-        
-        # Sync metrics
-        if hasattr(self, '_episode_metrics'):
-            self._episode_metrics['reward_components'] = self.reward_evaluator.get_reward_components().copy()
-            if signals['event_switch_type'] == 'manual':
-                self._episode_metrics['switch_events'] += 1
-            if signals['event_move_failed']:
-                self._episode_metrics['move_failures'] += 1
-                
-        return reward
+        if getattr(battle, 'won', None) is True:
+            return 1.0
+        elif getattr(battle, 'won', None) is False:
+            return -1.0
+        return 0.0
 
-    def step(self, action):
-        """Run one timestep."""
+    def step(self, actions):
+        """
+        Run one timestep (poke-env ParallelEnv API).
+
+        This environment is wrapped by poke-env's `SingleAgentWrapper`, so `actions` is
+        expected to be a dict mapping usernames -> discrete action indices.
+        """
         self._last_action_invalid = False
-        
-        # Store action for calc_reward to see
-        self._current_action_index = action
-        
+        self._current_action_index = actions
+
         try:
-            obs, reward, terminated, truncated, info = super().step(action)
-            
-            # Handle both dict (multi-agent) and float (single-agent) rewards
-            is_dict_reward = isinstance(reward, dict)
-            
-            if is_dict_reward:
-                # Multi-agent environment - extract our agent's reward
-                if not reward:  # Handle empty dict
-                    agent_key = self.possible_agents[0]
-                else:
-                    agent_key = list(reward.keys())[0]
-                reward_value = reward.get(agent_key, 0.0)
-            else:
-                reward_value = reward
-                agent_key = None
-            
-            # Apply penalty for invalid actions
-            if hasattr(self, '_last_action_invalid') and self._last_action_invalid:
-                 penalty = self.reward_config.get('invalid_action_penalty', 2.0)
-                 reward_value -= penalty
-            
-            # Update reward (dict or float)
-            if is_dict_reward:
-                reward[agent_key] = reward_value
-            else:
-                reward = reward_value
-            
-            # Populate info with signals detected in calc_reward
-            info.update(self._current_signals)
-            
-            # Metrics
-            if hasattr(self, 'get_metrics_info'):
-                metrics = self.get_metrics_info()
-                metrics['custom/switch_this_turn'] = 1.0 if self._current_signals.get('event_switch_type') == 'manual' else 0.0
-                metrics['custom/move_failed_this_turn'] = 1.0 if self._current_signals.get('event_move_failed') else 0.0
-                info.update(metrics)
-                for val in info.values():
-                    if isinstance(val, dict): val.update(metrics)
-            
-            # === COMPREHENSIVE REWARD LOGGING ===
-            # Log rewards for verification (first 5 turns per battle, and terminal)
-            try:
-                battle = getattr(self, 'current_battle', None) or getattr(self, '_current_battle', None)
-                if battle:
-                    turn = battle.turn
-                    if turn <= 5 or terminated:
-                        # Get reward components for detailed logging
-                        components = self.reward_evaluator.get_reward_components() if hasattr(self, 'reward_evaluator') else {}
-                        
-                        log_msg = f"\n[REWARD] Turn {turn}: Total={reward_value:+.2f}"
-                        
-                        # Add key components
-                        if components:
-                            hp_delta = components.get('hp_delta', 0)
-                            faint_delta = components.get('faint_delta', 0)
-                            log_msg += f" | HP:{hp_delta:+.2f} Faint:{faint_delta:+.1f}"
-                        
-                        if terminated:
-                            won = battle.won if hasattr(battle, 'won') else None
-                            outcome = "WIN ✓" if won else ("LOSS ✗" if won == False else "DRAW")
-                            log_msg += f" | {outcome}"
-                        
-                        print(log_msg)
-            except Exception:
-                pass  # Logging should never crash step
-            # =====================================
-            
-            return obs, reward, terminated, truncated, info
-            
+            return super().step(actions)
         except (ValueError, IndexError) as e:
             import logging
             logging.getLogger(__name__).error(f"CRITICAL ENV ERROR: {e}")
-            dummy_obs = self.embed_battle(self.current_battle) if self.current_battle else np.zeros(self.observation_space.shape)
-            return dummy_obs, 0.0, True, False, {"error": str(e)}
-            
-            # duplicate exception handler removed
+
+            try:
+                obs_dim = int(self._observation_space.shape[0])
+            except Exception:
+                obs_dim = int(getattr(self.obs_builder, "observation_size", 0))
+
+            zero_obs = np.zeros((obs_dim,), dtype=np.float32)
+            agent1 = getattr(self.agent1, "username", self.possible_agents[0])
+            agent2 = getattr(self.agent2, "username", self.possible_agents[1])
+
+            observations = {agent1: zero_obs, agent2: zero_obs}
+            rewards = {agent1: 0.0, agent2: 0.0}
+            terminated = {agent1: True, agent2: True}
+            truncated = {agent1: False, agent2: False}
+            infos = {agent1: {"error": str(e)}, agent2: {"error": str(e)}}
+
+            return observations, rewards, terminated, truncated, infos
 
     # =========================================================================
     # ACTION HANDLING - Remap invalid actions to valid ones
@@ -515,268 +411,3 @@ class Gen9RLEnvironment(SinglesEnv, gymnasium.Env):
              # tries to perform an action deemed invalid by the local client state.
              # The server is the ultimate arbiter.
              return 0
-
-class TrainingEnvManager:
-    """
-    Manages training environment lifecycle.
-    
-    Persistent implementation: Creates ONE environment and hot-swaps the opponent.
-    This prevents thread churn and segfaults.
-    """
-    
-    def __init__(
-        self,
-        pokemon_data: Optional[Dict[str, Any]] = None,
-        pokemon_data_path: str = "gen9randombattle.json",
-        battle_format: str = "gen9randombattle",
-        reward_config: Optional[Dict[str, float]] = None,
-        opponent = None, # Initial opponent
-        opponent_type: str = 'baseline',  # For win rate tracking
-    ):
-        self.pokemon_data = pokemon_data if pokemon_data else load_pokemon_data(pokemon_data_path)
-        self.pokemon_data_path = pokemon_data_path
-        self.battle_format = battle_format
-        self.reward_config = reward_config
-        self._opponent_type = opponent_type
-        
-        # Initialize the SINGLE persistent environment
-        self._init_env(opponent)
-    
-    def _init_env(self, opponent):
-        """Create the persistent environment instance."""
-        from poke_env.environment import SingleAgentWrapper
-        
-        # Create base env
-        self._base_env = Gen9RLEnvironment(
-            pokemon_data=self.pokemon_data,
-            pokemon_data_path=self.pokemon_data_path,
-            battle_format=self.battle_format,
-            reward_config=self.reward_config,
-        )
-        
-        # Wrap it
-        if opponent:
-            self._current_wrapper = SingleAgentWrapper(self._base_env, opponent=opponent)
-        else:
-            # Temporary placeholder if no opponent yet
-            self._current_wrapper = SingleAgentWrapper(self._base_env, opponent=opponent)
-        
-        # Wrap with CurriculumWrapper - pass opponent_type for win rate tracking
-        self._current_wrapper = CurriculumWrapper(self._current_wrapper, opponent_type=self._opponent_type)
-            
-        self._current_wrapper._base_env = self._base_env # Link back
-    
-    def swap_opponent(self, new_opponent, opponent_type: str = None):
-        """
-        Hot-swap the opponent without destroying the environment.
-        This keeps the background threads / websocket alive.
-        
-        Args:
-            new_opponent: The new opponent player
-            opponent_type: Name of opponent type for win rate tracking (e.g., 'max_damage')
-        """
-        if opponent_type:
-            self._opponent_type = opponent_type
-            # Update CurriculumWrapper's opponent_type
-            self._current_wrapper.set_opponent_type(opponent_type)
-        
-        if self._current_wrapper:
-            # Access underlying SingleAgentWrapper (wrapped by CurriculumWrapper)
-            # CurriculumWrapper -> SingleAgentWrapper
-            saw = self._current_wrapper.env 
-            saw._opponent = new_opponent
-            
-            # CRITICAL: We might need to reset underlying battle queue or state
-            # but poke-env handles most of this on reset().
-            # Just ensuring the wrapper points to the new guy is usually enough 
-            # IF the environment is reset immediately after.
-            
-            return self._current_wrapper
-            
-        # Fallback (shouldn't happen with proper init)
-    def close(self):
-        """Close the environment."""
-        if self._current_wrapper:
-            self._current_wrapper.close()
-
-def make_env(
-    pokemon_data: Optional[Dict[str, Any]] = None,
-    pokemon_data_path: str = "gen9randombattle.json",
-    battle_format: str = "gen9randombattle",
-    **kwargs
-) -> Gen9RLEnvironment:
-    """Factory function to create a Gen9RLEnvironment."""
-    return Gen9RLEnvironment(
-        pokemon_data=pokemon_data,
-        pokemon_data_path=pokemon_data_path,
-        battle_format=battle_format,
-        **kwargs
-    )
-
-
-def make_training_env(
-    opponent,
-    pokemon_data: Optional[Dict[str, Any]] = None,
-    pokemon_data_path: str = "gen9randombattle.json",
-    battle_format: str = "gen9randombattle",
-    reward_config: Optional[Dict[str, float]] = None,
-):
-    """
-    Create a training-ready environment with opponent.
-    """
-    from poke_env.environment import SingleAgentWrapper
-    env = Gen9RLEnvironment(
-        pokemon_data=pokemon_data,
-        pokemon_data_path=pokemon_data_path,
-        battle_format=battle_format,
-        reward_config=reward_config,
-    )
-    wrapped = SingleAgentWrapper(env, opponent=opponent)
-    wrapped._base_env = env
-    wrapped._opponent = opponent
-    
-    # Wrap with CurriculumWrapper
-    wrapped = CurriculumWrapper(wrapped)
-    
-    return wrapped
-
-class CurriculumWrapper(gymnasium.Wrapper):
-    """
-    Wrapper to explicitly expose set_progress method to SubprocVecEnv's env_method.
-    Also tracks opponent type and injects battle results into info dict for win rate tracking.
-    Handles dynamic opponent resampling to ensure curriculum progression.
-    """
-    def __init__(self, env, opponent_type: str = 'unknown', opponent_pool = None, win_tracker_path: str = None, pokemon_data = None):
-        super().__init__(env)
-        self._opponent_type = opponent_type
-        self.opponent_pool = opponent_pool
-        self.win_tracker_path = win_tracker_path
-        self.pokemon_data = pokemon_data
-        
-    def set_opponent_type(self, opponent_type: str):
-        """Set the current opponent type for win rate tracking."""
-        self._opponent_type = opponent_type
-        
-    def resample_opponent(self, progress: float):
-        """
-        Resample the opponent using the pool and hot-swap it.
-        Called via VecEnv.env_method() from the main process callback.
-        """
-        if not self.opponent_pool or not self.win_tracker_path:
-            return # Cannot resample without pool/tracker
-            
-        # Create local tracker instance to read stats
-        tracker = WinRateTracker(self.win_tracker_path)
-        
-        # Sample new opponent
-        # Note: logging happens inside sample_opponent
-        opponent, tier, agent_type = self.opponent_pool.sample_opponent(
-            progress=progress,
-            win_tracker=tracker,
-            pokemon_data=self.pokemon_data
-        )
-        
-        # Update internal tracking
-        self._opponent_type = agent_type
-        
-        # Hot-swap opponent in SingleAgentWrapper
-        # Access unwrapped env until we find SingleAgentWrapper or similar
-        # Typically: CurriculumWrapper -> Monitor -> SingleAgentWrapper
-        
-        current = self.env
-        swapped = False
-        while hasattr(current, 'env'):
-            # poke-env uses 'opponent' (no underscore), check both for safety
-            if hasattr(current, 'opponent'):
-                # print(f"[CurriculumWrapper] HOT-SWAPPING opponent to {agent_type}")
-                current.opponent = opponent
-                swapped = True
-                break
-            elif hasattr(current, '_opponent'):
-                print(f"[CurriculumWrapper] HOT-SWAPPING opponent (_opponent) to {agent_type}")
-                current._opponent = opponent
-                swapped = True
-                break
-            
-            if hasattr(current, 'env'):
-                current = current.env
-            else:
-                break
-        
-        if not swapped:
-            print(f"[CurriculumWrapper] WARNING: Could not find opponent attribute to swap!")
-        
-        # CRITICAL FIX: Also update PokeEnv's internal agent2's team
-        # The SingleAgentWrapper.opponent only handles choose_move()
-        # But PokeEnv's agent2 is what actually sends team to Showdown server
-        try:
-            # Find agent2 - it's in the PokeEnv which is wrapped by SingleAgentWrapper
-            # Structure: CurriculumWrapper -> Monitor -> SingleAgentWrapper -> Gen9RLEnvironment
-            # agent2 is in Gen9RLEnvironment (which extends PokeEnv)
-            
-            poke_env = None
-            current = self.env
-            while current is not None:
-                if hasattr(current, 'agent2'):
-                    poke_env = current
-                    break
-                current = getattr(current, 'env', None)
-            
-            if poke_env and hasattr(poke_env, 'agent2'):
-                # Get the new team from opponent's teambuilder
-                if hasattr(opponent, '_team') and opponent._team:
-                    # CRITICAL: Assign the Teambuilder OBJECT, not a string output!
-                    # This allows poke-env to call yield_team() for EACH battle.
-                    poke_env.agent2._team = opponent._team
-                    # Get a preview of what the next team looks like (for logging only)
-                    try:
-                        preview_team = opponent._team.yield_team() if hasattr(opponent._team, 'yield_team') else str(opponent._team)
-                        print(f"[CurriculumWrapper] UPDATED agent2 team: {preview_team[:50]}...")
-                    except Exception:
-                        print(f"[CurriculumWrapper] UPDATED agent2 team (Teambuilder assigned)")
-                elif hasattr(opponent, 'next_team'):
-                    # Alternative: use next_team property (likely a static string, acceptable fallback)
-                    new_team = opponent.next_team
-                    if new_team:
-                        poke_env.agent2._team = new_team
-                        print(f"[CurriculumWrapper] UPDATED agent2 team (next_team): {new_team[:50]}...")
-                    else:
-                        print(f"[CurriculumWrapper] WARNING: opponent.next_team returned None")
-                else:
-                    print(f"[CurriculumWrapper] WARNING: Opponent {type(opponent).__name__} has no _team or next_team")
-            else:
-                print(f"[CurriculumWrapper] WARNING: Could not find agent2 in environment chain")
-        except Exception as e:
-            print(f"[CurriculumWrapper] ERROR updating agent2 team: {e}")
-            
-        return agent_type
-        
-    def set_progress(self, progress: float):
-        """Pass progress to the underlying Gen9RLEnvironment."""
-        if hasattr(self.unwrapped, 'set_progress'):
-            self.unwrapped.set_progress(progress)
-        elif hasattr(self.env, 'set_progress'):
-            self.env.set_progress(progress)
-            
-    def step(self, action):
-        """Override step to inject opponent_type and battle_won into info."""
-        obs, reward, terminated, truncated, info = self.env.step(action)
-        
-        # Always include opponent type
-        info['opponent_type'] = self._opponent_type
-        
-        # Check for battle completion and add battle_won
-        if terminated:
-            try:
-                # Try to get battle result from underlying env
-                raw_env = self.unwrapped
-                if hasattr(raw_env, 'current_battle') and raw_env.current_battle:
-                    won = raw_env.current_battle.won
-                    info['battle_won'] = won if won is not None else False
-                else:
-                    # Fallback: infer from reward (positive = likely win)
-                    info['battle_won'] = reward > 0
-            except Exception:
-                info['battle_won'] = reward > 0
-        
-        return obs, reward, terminated, truncated, info

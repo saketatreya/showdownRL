@@ -1,8 +1,6 @@
 # Pokemon Showdown RL Agent 🧠⚔️
 
-![Status](https://img.shields.io/badge/Status-Research-blue.svg) ![Python](https://img.shields.io/badge/Python-3.10+-blue.svg) ![Framework](https://img.shields.io/badge/Framework-SB3_Contrib-orange.svg)
-
-A **Reinforcement Learning agent** for **Pokemon Showdown Random Battles** (Generation 9). Uses LSTM-based memory, Bayesian belief tracking, and potential-based reward shaping from expert replays.
+A **Reinforcement Learning agent** for **Pokemon Showdown Random Battles** (Generation 9), implementing the methodology from [Wang (2024)](wang-jett-meng-eecs-2024-thesis.pdf). Uses RecurrentPPO with LSTM memory, Bayesian belief tracking for hidden information, and pure self-play training with sparse terminal rewards.
 
 ---
 
@@ -38,68 +36,41 @@ cd pokemon-showdown && npm install && cd ..
 ./start_server.sh
 
 # Terminal 2: Run training
-python scripts/train.py --n-envs 8 --total-timesteps 1000000
+python scripts/train.py --n-envs 4
 ```
 
 ### Monitor Progress
 
 ```bash
-# Live training dashboard
-python scripts/monitor_training.py
+tensorboard --logdir logs/
 ```
 
 ---
 
 ## 🏗️ Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                       Training Loop (train.py)                  │
-│  ┌─────────────┐   ┌─────────────┐   ┌─────────────────────┐   │
-│  │ RecurrentPPO│   │ SubprocVecEnv│  │ CurriculumWrapper   │   │
-│  │ (LSTM 256)  │ → │ (8 workers) │ → │ (Opponent Sampling) │   │
-│  └─────────────┘   └─────────────┘   └─────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│                    Environment (Gen9RLEnvironment)               │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐   │
-│  │ poke-env     │  │ BeliefTracker│  │ RewardEvaluator      │   │
-│  │ (Showdown)   │  │ (POMDP)      │  │ (Hybrid/Potential)   │   │
-│  └──────────────┘  └──────────────┘  └──────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Observation Space (1149 dims)
-
-| Component | Dims | Description |
-|-----------|------|-------------|
-| Active Pokemon | 156 | HP, status, stats, moves, type |
-| Team State | 468 | 6 × 78 features per Pokemon |
-| Opponent Beliefs | 468 | Bayesian estimates of hidden info |
-| Field State | 57 | Weather, terrain, hazards, screens |
-
----
-
-## 🎯 Reward Shaping
-
-The agent uses **potential-based reward shaping** from a Win Predictor trained on 100k expert replays:
+See [docs/architecture.md](docs/architecture.md) for the full breakdown.
 
 ```
-R' = R_terminal + γΦ(s') - Φ(s)
+Training Pipeline
+ ├─ RecurrentPPO (LSTM 256) ──→ SubprocVecEnv (4-8 workers)
+ │                                  ├─ 70% Self-Play (frozen checkpoints)
+ │                                  └─ 30% RandomPlayer baseline
+ └─ Checkpoint Pool ──→ Historical snapshots for Fictitious Self-Play
+
+Environment (Gen9RLEnvironment)
+ ├─ poke-env (Showdown WebSocket)
+ ├─ BeliefTracker (Bayesian POMDP inference)
+ ├─ ObservationBuilder (1163-dim state vector)
+ └─ Sparse Reward: +1 (win) / -1 (loss) / 0 (other)
 ```
 
-Where Φ(s) = P(win | state) from the neural network.
+### Key Design Decisions
 
-### Win Predictor Training
-
-```bash
-# Scrape replays (if needed)
-python scripts/scrape_replays.py --target-count 10000 --min-rating 1300
-
-# Train win predictor
-python scripts/train_predictor.py
-```
+- **Sparse Rewards**: No intermediate reward shaping. The agent must learn strategy purely from win/loss signals.
+- **Self-Play**: 70% of training environments fight frozen historical checkpoints (Fictitious Self-Play).
+- **Wang LR Schedule**: Learning rate decays as `lr / (8x + 1)^1.5` over training.
+- **POMDP Handling**: Bayesian belief tracker infers opponent items, moves, and abilities from observations.
 
 ---
 
@@ -107,40 +78,28 @@ python scripts/train_predictor.py
 
 ```
 ├── src/
-│   ├── environment.py      # Gymnasium environment wrapper
-│   ├── rewards.py          # Reward evaluators (Hybrid, Potential)
-│   ├── encoders.py         # Observation space encoders
-│   ├── belief_tracker.py   # Bayesian inference for hidden info
-│   ├── win_predictor.py    # Neural network for win probability
-│   ├── replay_parser.py    # Parse Showdown replays for training
-│   ├── curriculum_agents/  # Scripted opponent bots
-│   └── teams/              # Team builders
+│   ├── environment.py         # Gymnasium environment wrapper
+│   ├── encoders.py            # Observation space encoders (1163 dims)
+│   ├── embeddings.py          # ObservationBuilder
+│   ├── belief_tracker.py      # Bayesian inference for hidden info
+│   ├── damage_calc.py         # Damage projection engine
+│   ├── shadow_battle.py       # Lightweight battle state proxy
+│   ├── actions.py             # Action space handler (0-25 mapping)
+│   ├── trained_player.py      # Inference wrapper for trained models
+│   ├── callbacks.py           # TensorBoard + ELO callbacks
+│   ├── elo_tracker.py         # ELO rating system
+│   ├── config.py              # Training hyperparameters
+│   ├── utils.py               # Shared utilities
+│   └── teams/
+│       ├── random_battle_teambuilder.py  # Random team generation
+│       └── team_validator.py             # Team format validation
 ├── scripts/
-│   ├── train.py            # Main RL training script
-│   ├── train_predictor.py  # Win predictor training
-│   ├── scrape_replays.py   # Download replays from Showdown
-│   ├── play_against_bot.py # Interactive play
-│   └── monitor_*.py        # Training monitors
-├── docs/                   # Documentation
+│   ├── train.py               # Main training script (PPO + self-play)
+│   └── play_against_bot.py    # Interactive play with debug visualization
+├── docs/                      # Documentation
+├── gen9randombattle.json       # Pokemon role/moveset data dictionary
 └── requirements.txt
 ```
-
----
-
-## 🔬 Research Features
-
-### Curriculum Learning
-Progressive opponent unlocking based on training progress:
-- 0%+: Random, MaxDamage, Heuristic
-- 10%+: TypePunisher
-- 20%+: Self-play (frozen checkpoints)
-- 50%+: PassivityExploiter
-
-### Win Predictor
-Supervised learning on 100k high-Elo replays:
-- 744-dimensional feature vector
-- MLP architecture (512 → 256 → 128 → 1)
-- ~57% validation accuracy on early/mid-game states
 
 ---
 
@@ -150,6 +109,7 @@ MIT License
 
 ## 🙏 Acknowledgments
 
+- [Wang (2024)](wang-jett-meng-eecs-2024-thesis.pdf) - *Winning at Pokémon Random Battles Using Reinforcement Learning* (MIT M.Eng Thesis)
 - [poke-env](https://github.com/hsahovic/poke-env) - Pokemon Showdown Python interface
 - [Pokemon Showdown](https://pokemonshowdown.com/) - Battle simulator
 - [Stable Baselines 3](https://stable-baselines3.readthedocs.io/) - RL algorithms

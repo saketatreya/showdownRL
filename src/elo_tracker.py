@@ -62,7 +62,7 @@ class EloTracker:
         self, 
         player1: str, 
         player2: str, 
-        player1_won: bool
+        player1_score: float
     ):
         """
         Update ELO ratings after a battle.
@@ -70,8 +70,12 @@ class EloTracker:
         Args:
             player1: Name of first player/checkpoint
             player2: Name of second player/checkpoint  
-            player1_won: True if player1 won
+            player1_score: 1.0=win, 0.0=loss, 0.5=draw
         """
+        s1 = float(player1_score)
+        if s1 < 0.0 or s1 > 1.0:
+            raise ValueError(f"player1_score must be in [0, 1], got {player1_score}")
+
         r1 = self.get_rating(player1)
         r2 = self.get_rating(player2)
         
@@ -80,18 +84,29 @@ class EloTracker:
         e2 = 1 - e1
         
         # Actual scores
-        s1 = 1.0 if player1_won else 0.0
-        s2 = 1 - s1
+        s2 = 1.0 - s1
         
         # Update ratings
         self.ratings[player1] = r1 + self.K_FACTOR * (s1 - e1)
         self.ratings[player2] = r2 + self.K_FACTOR * (s2 - e2)
         
         # Record match
+        if s1 > 0.5:
+            result = "win"
+            winner = player1
+        elif s1 < 0.5:
+            result = "loss"
+            winner = player2
+        else:
+            result = "draw"
+            winner = "draw"
+
         self.match_history.append({
             'p1': player1,
             'p2': player2,
-            'winner': player1 if player1_won else player2
+            'result': result,
+            'p1_score': s1,
+            'winner': winner,
         })
         
         self._save()

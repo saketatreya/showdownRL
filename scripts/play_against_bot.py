@@ -55,14 +55,17 @@ class DebugTrainedPlayer(TrainedPlayer):
             deterministic=self.deterministic
         )
         self._episode_start = False
+
+        # Convert action to int (SB3 often returns a 1D numpy array)
+        action_int = int(action.item()) if hasattr(action, "item") else int(action)
         
         # 4. Show selected action
         print("-" * 40)
-        chosen_readable = self._get_readable_action(int(action), battle)
+        chosen_readable = self._get_readable_action(action_int, battle)
         print(f"✅ DECISION: {chosen_readable}")
         print("=" * 80 + "\n")
         
-        return self._action_to_order(battle, action)
+        return self._action_to_order(battle, action_int)
 
     def _show_observation_breakdown(self, battle: AbstractBattle):
         """Display the observation vector components in a readable format."""
@@ -389,56 +392,57 @@ class DebugTrainedPlayer(TrainedPlayer):
             print(f"   (Could not compute probabilities: {e})")
 
     def _get_readable_action(self, action: int, battle: AbstractBattle) -> str:
-        """Convert action index to human-readable string, matching actual execution logic."""
-        n_moves = len(battle.available_moves)
-        n_switches = len(battle.available_switches)
-        can_tera = battle.can_tera
-        
-        if action < 4:
-            # Move actions 0-3
-            if action < n_moves:
-                move = battle.available_moves[action]
-                return f"Move: {move.id}"
-            elif n_moves > 0:
-                # Fallback to first move
-                return f"Move: {battle.available_moves[0].id} (fallback from {action})"
-            elif n_switches > 0:
-                return f"Switch: {battle.available_switches[0].species} (no moves, fallback)"
-            else:
-                return "Default (no options)"
-        
-        elif action < 9:
-            # Switch actions 4-8
-            switch_idx = action - 4
-            if switch_idx < n_switches:
-                return f"Switch: {battle.available_switches[switch_idx].species}"
-            elif n_switches > 0:
-                return f"Switch: {battle.available_switches[0].species} (fallback from {action})"
-            elif n_moves > 0:
-                return f"Move: {battle.available_moves[0].id} (no switches, fallback)"
-            else:
-                return "Default (no options)"
-        
-        elif action < 13:
-            # Tera moves 9-12
-            move_idx = action - 9
-            if move_idx < n_moves and can_tera:
-                return f"Tera + {battle.available_moves[move_idx].id}"
-            elif move_idx < n_moves:
-                return f"Move: {battle.available_moves[move_idx].id} (can't tera)"
-            elif n_moves > 0:
-                return f"Move: {battle.available_moves[0].id} (fallback from tera {action})"
-            else:
-                return f"Default (fallback from {action})"
-        
+        """
+        Convert action index to human-readable string using poke-env's native SinglesEnv mapping.
+
+        Mapping (Gen9 SinglesEnv):
+        0-5: switch
+        6-9: move
+        10-13: move + mega
+        14-17: move + z-move
+        18-21: move + dynamax
+        22-25: move + terastallize
+        """
+        if not isinstance(action, int):
+            action = int(action)
+
+        if action < 0 or action >= 26:
+            return f"Invalid action index {action}"
+
+        if action < 6:
+            team = list(battle.team.values())
+            if action < len(team):
+                return f"Switch: {team[action].species}"
+            return f"Switch: (slot {action})"
+
+        if battle.active_pokemon is None:
+            return f"Move: (no active) [{action}]"
+
+        mvs = (
+            battle.available_moves
+            if len(battle.available_moves) == 1 and battle.available_moves[0].id in ["struggle", "recharge"]
+            else list(battle.active_pokemon.moves.values())
+        )
+
+        move_idx = (action - 6) % 4
+        gimmick = (action - 6) // 4  # 0=none,1=mega,2=z,3=dmax,4=tera
+
+        if move_idx >= len(mvs):
+            move_name = f"(move slot {move_idx})"
         else:
-            # Reserved actions 13-25
-            if n_moves > 0:
-                return f"Move: {battle.available_moves[0].id} (reserved action {action})"
-            elif n_switches > 0:
-                return f"Switch: {battle.available_switches[0].species} (reserved action {action})"
-            else:
-                return f"Default (reserved action {action})"
+            move_name = mvs[move_idx].id
+
+        prefix = ""
+        if gimmick == 1:
+            prefix = "Mega + "
+        elif gimmick == 2:
+            prefix = "Z-Move + "
+        elif gimmick == 3:
+            prefix = "Dynamax + "
+        elif gimmick == 4:
+            prefix = "Tera + "
+
+        return f"{prefix}Move: {move_name}"
 
 
 async def main():

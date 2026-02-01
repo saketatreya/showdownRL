@@ -9,11 +9,11 @@ from typing import Optional, Dict, Any
 from poke_env.player import Player
 from poke_env.battle import AbstractBattle
 from poke_env.player.battle_order import BattleOrder
+from poke_env.environment import SinglesEnv
 
 from .belief_tracker import BeliefTracker
 from .embeddings import ObservationBuilder
 from .utils import load_pokemon_data
-from .actions import ActionHandler
 
 
 class TrainedPlayer(Player):
@@ -58,11 +58,11 @@ class TrainedPlayer(Player):
         # Initialize belief tracker and observation builder
         self.belief_tracker = BeliefTracker(self.pokemon_data)
         self.obs_builder = ObservationBuilder(self.pokemon_data, self.belief_tracker)
-        self.action_handler = ActionHandler()
         
         # LSTM hidden state (for RecurrentPPO)
         self._lstm_states = None
         self._episode_start = True
+        self._last_battle_tag = None
     
     def choose_move(self, battle: AbstractBattle) -> BattleOrder:
         """
@@ -74,6 +74,19 @@ class TrainedPlayer(Player):
         Returns:
             BattleOrder to execute
         """
+        # If this Player instance is used purely as a policy (e.g. as the opponent in
+        # poke-env's SingleAgentWrapper), it will not receive PSClient battle callbacks.
+        # Detect new battles and reset episode state manually to avoid cross-battle leakage.
+        battle_tag = getattr(battle, "battle_tag", None)
+        if battle_tag is not None and battle_tag != self._last_battle_tag:
+            try:
+                self.belief_tracker.reset()
+            except Exception:
+                pass
+            self._lstm_states = None
+            self._episode_start = True
+            self._last_battle_tag = battle_tag
+
         # Update beliefs
         self._update_beliefs(battle)
         
@@ -81,12 +94,18 @@ class TrainedPlayer(Player):
         obs = self.obs_builder.embed_battle(battle)
         
         # Get action from model
-        action, self._lstm_states = self.model.predict(
-            obs,
-            state=self._lstm_states,
-            episode_start=np.array([self._episode_start]),
-            deterministic=self.deterministic
-        )
+        try:
+            action, self._lstm_states = self.model.predict(
+                obs,
+                state=self._lstm_states,
+                episode_start=np.array([self._episode_start]),
+                deterministic=self.deterministic,
+            )
+        except Exception:
+            # Never crash callers (training/eval) because a frozen opponent checkpoint is incompatible.
+            self._lstm_states = None
+            self._episode_start = True
+            return Player.choose_random_singles_move(battle)
         self._episode_start = False
         
         # Convert action to int (handles 0-dim numpy arrays from predict)
@@ -111,8 +130,19 @@ class TrainedPlayer(Player):
                 self.belief_tracker.update(species, observed_ability=pokemon.ability)
     
     def _action_to_order(self, battle: AbstractBattle, action: int) -> BattleOrder:
-        """Convert action index to BattleOrder using centralized handler."""
-        return self.action_handler.action_to_order(action, battle)
+        """
+        Convert an action index to a BattleOrder using poke-env's native mapping.
+        This keeps TrainedPlayer compatible with the environment's 26-action space.
+        """
+        # Ensure action is in-range for Discrete(26)
+        if action < 0 or action >= 26:
+            action = max(0, min(25, int(action)))
+
+        try:
+            return SinglesEnv.action_to_order(np.int64(action), battle, fake=False, strict=True)
+        except Exception:
+            # Never crash training/eval because an opponent produced an illegal action.
+            return Player.choose_random_singles_move(battle)
     
     def _battle_finished_callback(self, battle: AbstractBattle):
         """Called when battle finishes. Reset state."""
@@ -120,6 +150,7 @@ class TrainedPlayer(Player):
         self.belief_tracker.reset()
         self._lstm_states = None
         self._episode_start = True
+        self._last_battle_tag = None
 
 
 def load_trained_player(

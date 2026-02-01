@@ -1,1 +1,1 @@
-"""Team management for curriculum agents."""
+"""Team builders for random battle format."""
