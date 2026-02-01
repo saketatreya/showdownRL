@@ -83,25 +83,23 @@ python scripts/monitor_training.py
 
 ## 🎯 Reward Shaping
 
-### Option 1: Hybrid Rewards (Default)
-Dense rewards based on battle momentum:
-```python
-python scripts/train.py --reward-shaping hybrid
+The agent uses **potential-based reward shaping** from a Win Predictor trained on 100k expert replays:
+
+```
+R' = R_terminal + γΦ(s') - Φ(s)
 ```
 
-### Option 2: Potential-Based Rewards
-Uses a **Win Predictor** trained on 100k expert replays:
-```python
-# First, train the win predictor (if not already done)
+Where Φ(s) = P(win | state) from the neural network.
+
+### Win Predictor Training
+
+```bash
+# Scrape replays (if needed)
+python scripts/scrape_replays.py --target-count 10000 --min-rating 1300
+
+# Train win predictor
 python scripts/train_predictor.py
-
-# Then train with potential-based shaping
-python scripts/train.py --reward-shaping potential
 ```
-
-The potential-based approach uses:
-- R' = R + γΦ(s') - Φ(s)
-- Where Φ(s) = P(win | state) from the neural network
 
 ---
 

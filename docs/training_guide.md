@@ -1,97 +1,70 @@
-# Training Guide 🏋️‍♂️
+# Training Guide
 
-## 1. Quick Start
+## Quick Start
 
 ```bash
-# Start local Showdown server (in pokemon-showdown directory)
-node pokemon-showdown start --no-security
+# Terminal 1: Start Showdown server
+./start_server.sh
 
-# Run training (in showdownbot directory)
-python scripts/train.py --timesteps 10000000 --n-envs 7 --experiment-name my_run
+# Terminal 2: Run training
+python scripts/train.py --n-envs 8 --total-timesteps 1000000
 ```
 
-## 2. Key Flags
+## Command Line Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--timesteps` | 10M | Total environment steps to train |
-| `--n-envs` | 7 | Parallel environments (set to CPU cores - 1) |
-| `--n-steps` | 2048 | Steps per rollout before update |
-| `--experiment-name` | hybrid_ladder | Checkpoint directory name |
-| `--resume` | None | Path to checkpoint to resume from |
-| `--dry-run` | False | Short 1000-step test run |
-| `--no-subproc` | False | Use DummyVecEnv (for debugging) |
+| `--total-timesteps` | 1M | Total environment steps |
+| `--n-envs` | 8 | Parallel environments |
+| `--reward-shaping` | potential | Reward type (potential only) |
+| `--resume` | None | Resume from checkpoint |
+| `--dry-run` | False | Quick 1000-step test |
 
-## 3. Understanding Logs
+## Training the Win Predictor
 
-### Terminal Output
+Before using potential-based shaping, train the win predictor:
+
+```bash
+# Scrape replays (if needed)
+python scripts/scrape_replays.py --target-count 10000 --min-rating 1300
+
+# Train predictor
+python scripts/train_predictor.py
+
+# Monitor progress
+python scripts/monitor_training.py
 ```
-=== Iteration 5 (Step 10000/10000000) ===
-Phase:    EARLY
-Progress: 0.10% (LR: 5.8e-05)
-```
-- **Phase**: Current curriculum phase (EARLY/MID/LATE)
-- **Progress**: Percentage of total timesteps completed
 
-### Key Metrics (Tensorboard)
+## Monitoring
+
+### Tensorboard
 ```bash
 tensorboard --logdir logs/
 ```
 
 | Metric | Meaning |
 |--------|---------|
-| `rollout/ep_rew_mean` | Average episode reward (higher = better) |
-| `rollout/ep_len_mean` | Average battle length in turns |
-| `train/approx_kl` | Policy change magnitude (should stay < 0.05) |
-| `train/entropy_loss` | Exploration level (decreases over time) |
-| `curriculum/winrate_*` | Win rate against each agent type |
+| `rollout/ep_rew_mean` | Average episode reward |
+| `rollout/ep_len_mean` | Average battle length |
+| `curriculum/winrate_*` | Win rate per opponent |
 
-### Reward Interpretation
-| Range | Meaning |
-|-------|---------|
-| -150 to -80 | Random/broken policy |
-| -80 to -40 | Learning basics |
-| -40 to 0 | Competent play |
-| > 0 | Winning more than losing |
+## Checkpoints
 
-## 4. Curriculum Phases
-
-Automatically advances based on training progress:
-
-| Phase | Progress | Focus | Reward Weight |
-|-------|----------|-------|---------------|
-| EARLY | 0–20% | Damage & KOs | High `w_fainted` |
-| MID | 20–50% | Strategy & Setup | High `w_matchup` |
-| LATE | 50%+ | Winning Games | High `victory_bonus` |
-
-## 5. Checkpoints
-
-Saved to `checkpoints/<experiment_name>/`:
-- `model_N.zip` - Periodic saves (every ~50k steps)
+Saved to `checkpoints/<experiment>/`:
+- `model_N.zip` - Periodic saves
 - `model_final.zip` - End of training
 - `frozen_iter_N.zip` - Self-play snapshots
-- `win_tracker.json` - Per-agent win rate history
 
-## 6. Resuming Training
-
-```bash
-python scripts/train.py --resume checkpoints/my_run/model_50.zip --timesteps 20000000
-```
-
-## 7. Watching the Bot
+## Resuming Training
 
 ```bash
-# Launch dashboard
-streamlit run scripts/dashboard.py
-
-# In browser: Load model, click "Watch Self-Play" or "Play Against Bot"
+python scripts/train.py --resume checkpoints/my_run/model_50.zip
 ```
 
-## 8. Troubleshooting
+## Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
-| "Already challenging" loop | Restart Showdown server |
-| "Team was rejected" | Check `gen9randombattle.json` for invalid Pokemon |
-| Low FPS (< 50) | Reduce `--n-envs` |
-| OOM errors | Reduce `--n-envs` or `--n-steps` |
+| "Already challenging" | Restart Showdown server |
+| Server won't start | Check Node.js: `node --version` |
+| OOM errors | Reduce `--n-envs` |
