@@ -21,6 +21,7 @@ models/
 *.pt
 *.pth
 checkpoints/
+logs/
 
 # External dependencies (clone separately)
 pokemon-showdown/
