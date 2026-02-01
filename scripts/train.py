@@ -53,10 +53,13 @@ def parse_args():
                         help="Directory for tensorboard logs")
     parser.add_argument("--pokemon-data", type=str, default="gen9randombattle.json",
                         help="Path to Pokemon data JSON")
-    parser.add_argument("--battle-format", type=str, default="gen9curriculumbattle",
-                        help="Battle format (use gen9curriculumbattle for curriculum training)")
+    parser.add_argument("--battle-format", type=str, default="gen9randombattle",
+                        help="Battle format (gen9randombattle for standard, gen9curriculumbattle for curriculum)")
     parser.add_argument("--lr", type=float, default=default_config.learning_rate,
                         help="Initial Learning rate")
+    parser.add_argument("--lr-schedule", type=str, default="wang",
+                        choices=["constant", "linear", "wang"],
+                        help="Learning rate schedule: 'wang' (lr/(8x+1)^1.5), 'linear', or 'constant'")
     parser.add_argument("--n-steps", type=int, default=default_config.n_steps,
                         help="Steps per rollout")
     parser.add_argument("--batch-size", type=int, default=default_config.batch_size,
@@ -73,11 +76,15 @@ def parse_args():
                         help="Resume from checkpoint path")
     parser.add_argument("--dry-run", action="store_true",
                         help="Quick test run with minimal steps")
-    # === NEW: Parallel environment options ===
+    # Parallel environment options
     parser.add_argument("--n-envs", type=int, default=8,
                         help="Number of parallel environments")
     parser.add_argument("--no-subproc", action="store_true",
                         help="Use DummyVecEnv instead of SubprocVecEnv (for debugging)")
+    # Training mode
+    parser.add_argument("--training-mode", type=str, default="selfplay",
+                        choices=["selfplay", "curriculum", "baseline"],
+                        help="Training mode: 'selfplay' (frozen checkpoints), 'baseline' (poke-env bots), 'curriculum' (progressive)")
     
     return parser.parse_args()
 
@@ -124,12 +131,15 @@ def make_parallel_env(
     pokemon_data: dict,
     battle_format: str,
     checkpoint_dir: str,
+    training_mode: str = "selfplay",
     current_progress: float = 0.0,
     log_dir: Optional[Path] = None,
 ) -> Callable:
     """
     Factory function for creating independent environment instances.
-    Instantiates a local OpponentPoolManager to sample curriculum opponents.
+    
+    Args:
+        training_mode: 'selfplay' (frozen checkpoints), 'baseline' (poke-env bots), 'curriculum' (progressive)
     """
     def _init() -> Gen9RLEnvironment:
         # Create unique identity for this worker
@@ -169,10 +179,9 @@ def make_parallel_env(
         tracker = WinRateTracker(str(win_tracker_path))
         
         # =====================================================
-        # TRAINING MODE SELECTION (v12 Ablation)
+        # TRAINING MODE SELECTION
         # =====================================================
-        training_mode = os.environ.get("TRAINING_MODE", "baseline")
-        rigorous_mode = os.environ.get("RIGOROUS_MODE", "0") == "1"
+        # Use parameter instead of env var (CLI arg --training-mode)
         
         if training_mode == "selfplay" and not pool.checkpoint_pool.is_empty and random.random() < 0.30:
             # Self-play mode: 30% chance of playing against frozen checkpoint
@@ -194,8 +203,8 @@ def make_parallel_env(
                 )
                 agent_type = "random_player"
                 tier = "BASELINE"
-        elif rigorous_mode or training_mode in ["baseline", "selfplay"]:
-            # Baseline/Selfplay: Use only poke-env baseline opponents
+        elif training_mode in ["baseline", "selfplay"]:
+            # Baseline/Selfplay: Use poke-env baseline opponents
             from poke_env.player import RandomPlayer, MaxBasePowerPlayer, SimpleHeuristicsPlayer
             
             opponent_choice = rank % 3
@@ -242,13 +251,11 @@ def make_parallel_env(
             teambuilder=training_teambuilder,
         )
         
-        # Skip team syncing in rigorous mode (random battles auto-generate)
-        if not rigorous_mode and opponent and hasattr(opponent, '_team'):
+        # Sync team with opponent if available
+        if opponent and hasattr(opponent, '_team'):
             if hasattr(env, 'agent2'):
                 env.agent2._team = opponent._team
                 print(f"Worker {rank}: Synced agent2 team with {agent_type}")
-            else:
-                 print(f"Worker {rank}: Warning - Could not find agent2 to sync team")
         
         # Wrap with opponent
         wrapped = SingleAgentWrapper(env, opponent=opponent)
@@ -321,6 +328,7 @@ def main():
             pokemon_data=pokemon_data,
             battle_format=args.battle_format,
             checkpoint_dir=str(checkpoint_dir),
+            training_mode=args.training_mode,
             current_progress=0.0,
             log_dir=log_dir,
         )
@@ -359,7 +367,7 @@ def main():
     from sb3_contrib import RecurrentPPO
     
     # Prepare LR schedule - Use Wang's Inverse Decay by default now
-    lr_schedule = get_lr_schedule(args.lr, "wang")
+    lr_schedule = get_lr_schedule(args.lr, args.lr_schedule)
     
     if args.resume:
         print(f"Resuming from checkpoint: {args.resume}")
