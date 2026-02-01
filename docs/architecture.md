@@ -9,25 +9,25 @@ This document provides a comprehensive overview of the refactored ShowdownBot ar
 ```mermaid
 graph TD
     subgraph "Training Pipeline (train.py)"
-        Trainer[Trainer (RecurrentPPO)] -->|Push checkpts| CkptPool[Checkpoint Directory]
-        Trainer -->|Spawn 4-8 Parallel Envs| VecEnv(SubprocVecEnv)
+        Trainer["Trainer - RecurrentPPO"] -->|Push checkpoints| CkptPool["Checkpoint Directory"]
+        Trainer -->|Spawn 4-8 Parallel Envs| VecEnv["SubprocVecEnv"]
         
-        VecEnv --> Env1[Gen9RLEnvironment 1]
-        VecEnv --> Env2[Gen9RLEnvironment X]
+        VecEnv --> Env1["Gen9RLEnvironment 1"]
+        VecEnv --> Env2["Gen9RLEnvironment X"]
         
-        CkptPool -->|Sample 70% of time| SPPlayer[TrainedPlayer (Past Checkpoint)]
+        CkptPool -->|Sample 70% of time| SPPlayer["TrainedPlayer - Past Checkpoint"]
         SPPlayer -.->|Vs| Env1
     end
 
     subgraph "Environment Details (Gen9RLEnvironment)"
-        B[Poke-Env Battle API] -->|Feeds data to| BT[BeliefTracker]
-        B -->|Feeds data to| OB[ObservationBuilder]
+        B["Poke-Env Battle API"] -->|Feeds data to| BT["BeliefTracker"]
+        B -->|Feeds data to| OB["ObservationBuilder"]
         BT -->|Prior distributions| OB
-        OB -->|Outputs 1163 Floats| LSTM[Maskable PPO LSTM Policy]
-        LSTM -->|Select Action 0-25| AO[SinglesEnv action_to_order]
+        OB -->|Outputs 1163 Floats| LSTM["Maskable PPO LSTM Policy"]
+        LSTM -->|Select Action 0-25| AO["SinglesEnv action_to_order"]
         AO -->|Execute| B
         
-        B -->|Terminal Condition| R[Sparse Reward: +1 / -1 / 0]
+        B -->|Terminal Condition| R["Sparse Reward: +1 / -1 / 0"]
         R --> LSTM
     end
 ```
