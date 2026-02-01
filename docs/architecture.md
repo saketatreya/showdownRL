@@ -68,13 +68,3 @@ The execution orchestrator.
 - Dictates the core Wang curriculum learning-rate decay function: `lr / (8x + 1)^1.5` over time.
 
 ---
-
-## Cleanups Taken to Achieve This
-
-The following systems existed in prior iterations but were explicitly deleted to achieve the current streamlined RL pipeline:
-- **`src/curriculum_agents/`** (`OpponentPoolManager`, `WinRateTracker`): We no longer rotate heuristic opponents based on complex phase conditions. We just use random uncurated past checkpoints (Self-Play).
-- **Dense Rewards (`src/rewards.py`)**: The model no longer receives fractional scalar points for matching types or maintaining high HP.
-- **Thematic Teambuilding (`src/teams/`)**: Teams are generated natively and purely randomly by the server's `gen9randombattle` engine.
-- **Unused Scripts**: Removed `scripts/tune_hyperparams.py` because it relied on the deleted curriculum components and didn't fit into the new simplified paradigm.
-
-*(Note: Your IDE may still show `docs/rewards.md` as open, but it—along with `docs/curriculum_agents.md`—has been fully deleted from the filesystem as they are no longer relevant to the codebase.)*
